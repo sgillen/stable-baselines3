@@ -1,9 +1,11 @@
-import multiprocessing as mp
+import torch.multiprocessing as mp # needed for passing tensors around between processes
+import multiprocessing as pmp # needed for type hints
 from collections import OrderedDict
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Type, Union
 
 import gym
 import numpy as np
+import torch.nn as nn
 
 from stable_baselines3.common.vec_env.base_vec_env import (
     CloudpickleWrapper,
@@ -15,13 +17,14 @@ from stable_baselines3.common.vec_env.base_vec_env import (
 
 
 def _worker(
-    remote: mp.connection.Connection, parent_remote: mp.connection.Connection, env_fn_wrapper: CloudpickleWrapper
+    remote: pmp.connection.Connection, parent_remote: pmp.connection.Connection, env_fn_wrapper: CloudpickleWrapper
 ) -> None:
     # Import here to avoid a circular import
     from stable_baselines3.common.env_util import is_wrapped
 
     parent_remote.close()
     env = env_fn_wrapper.var()
+    policy = None
     while True:
         try:
             cmd, data = remote.recv()
@@ -32,6 +35,45 @@ def _worker(
                     info["terminal_observation"] = observation
                     observation = env.reset()
                 remote.send((observation, reward, done, info))
+
+            elif cmd == "do_rollout":
+                if policy is None:
+                    print("You idiot")
+                    return None, None, None, None
+
+                num_steps = data
+                obs_mat = np.zeros((num_steps, env.observation_space.shape[0]))
+                act_mat = np.zeros((num_steps, env.action_space.shape[0]))
+                rew_mat = np.zeros(num_steps)
+                done_mat = np.zeros(num_steps, dtype=bool)
+                info_list = []
+
+                done = False
+                obs = env.reset()
+
+                for step in range(num_steps):
+                    obs_mat[step, :] = np.copy(obs)
+                    act = policy.predict(obs)[0]
+
+                    obs, rew, done, info = env.step(act)
+
+                    if done:
+                        # save final observation where user can get it, then reset
+                        info["terminal_observation"] = obs
+                        obs = env.reset()
+
+
+                    act_mat[step, :] = np.copy(act)
+                    rew_mat[step] = rew
+                    done_mat[step] = done
+                    info_list.append(info)
+
+                #remote.send((None, None, None, None, None))
+                remote.send((obs_mat, act_mat, rew_mat, done_mat, info_list))
+
+            elif cmd == "set_policy":
+                policy = data
+
             elif cmd == "seed":
                 remote.send(env.seed(data))
             elif cmd == "reset":
@@ -88,6 +130,7 @@ class SubprocVecEnv(VecEnv):
         self.waiting = False
         self.closed = False
         n_envs = len(env_fns)
+        self.policy = None
 
         if start_method is None:
             # Fork is not a thread safe method (see issue #217)
@@ -121,6 +164,22 @@ class SubprocVecEnv(VecEnv):
         self.waiting = False
         obs, rews, dones, infos = zip(*results)
         return _flatten_obs(obs, self.observation_space), np.stack(rews), np.stack(dones), infos
+
+    def do_rollout(self, num_steps: int):
+        for remote in self.remotes:
+            remote.send(("do_rollout", num_steps))
+        results = [remote.recv() for remote in self.remotes]
+        obs,acts,rews,done,info = zip(*results)
+        #return None
+        return _flatten_obs(obs, self.observation_space), acts, np.stack(rews), np.stack(done), info
+
+    def set_policy(self, policy_or_policies: Union[nn.Module, List[nn.Module]]) -> None:
+        if type(policy_or_policies) == list:
+            for remote, policy in zip(self.remotes, policy_or_policies):
+                remote.send(("set_policy", policy))
+        else:
+            for remote in self.remotes:
+                remote.send(("set_policy", policy_or_policies))
 
     def seed(self, seed: Optional[int] = None) -> List[Union[None, int]]:
         for idx, remote in enumerate(self.remotes):

@@ -7,6 +7,8 @@ import cloudpickle
 import gym
 import numpy as np
 
+import torch.nn as nn
+
 # Define type aliases here to avoid circular import
 # Used when we want to access one or more VecEnv
 VecEnvIndices = Union[None, int, Iterable[int]]
@@ -59,6 +61,7 @@ class VecEnv(ABC):
         self.num_envs = num_envs
         self.observation_space = observation_space
         self.action_space = action_space
+        self.policy = None
 
     @abstractmethod
     def reset(self) -> VecEnvObs:
@@ -160,6 +163,55 @@ class VecEnv(ABC):
         """
         self.step_async(actions)
         return self.step_wait()
+
+    def set_policy(self, policy: nn.Module) -> None:
+        self.policy = policy
+
+    def set_weights(self, weights:Dict) -> None:
+        self.policy.load_state_dict(weights)
+
+    def do_rollout(self, num_steps: int):
+        """
+        Do rollout with the environments, requires you to call "set policy" first TODO
+        :param num_steps: Number of steps to do
+
+        :return (observations, rewards, dones, information):
+        """
+
+        if self.policy is None:
+            raise Exception("You Dummy, You need to set the policy first")
+
+
+        # Would need to rewrite for dict spaces
+        obs_mat = np.zeros((num_steps, self.num_envs, self.observation_space.shape[0]))
+        act_mat = np.zeros((num_steps, self.num_envs, self.action_space.shape[0]))
+        rew_mat = np.zeros((num_steps, self.num_envs))
+        done_mat = np.zeros((num_steps, self.num_envs), dtype=bool)
+        info_list = []
+
+        done = np.zeros(self.num_envs, dtype=bool)
+        obs = self.reset()
+
+        for step in range(num_steps):
+            obs_mat[step, :,:] = np.copy(obs)
+
+            if type(self.policy) == list:
+                act = np.zeros((self.num_envs, self.action_space.shape[0]))
+                for i in range(self.num_envs):
+                    act[i,:] = self.policy[i].predict(obs)[0]
+            else:
+                act = self.policy.predict(obs)[0]
+
+            obs,rew,done,info = self.step(act)
+
+            act_mat[step, :,:] = np.copy(act)
+            rew_mat[step, :] = rew
+            done_mat[step, :] = done
+            info_list.append(info)
+
+
+        #return np.stack(obs_list), np.stack(rews_list), np.stack(done_list), info_list
+        return obs_mat, act_mat, rew_mat, done_mat, info_list
 
     def get_images(self) -> Sequence[np.ndarray]:
         """
