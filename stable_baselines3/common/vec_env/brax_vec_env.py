@@ -21,14 +21,14 @@ class BraxVecEnvWrapper(VecEnv):
 
     def step_wait(self) -> VecEnvStepReturn:
         obs, rews, dones, infos = self.brax_vec_gym_env.step(self.actions)
-        return np.array(obs), np.array(rews), np.array(dones), infos
+        return np.array(obs, copy=False), np.array(rews, copy=False), np.array(dones, copy=False), infos
 
     def step(self, actions: act_dtype):
         self.step_async(actions)
         return self.step_wait()
 
     def reset(self) -> VecEnvObs:
-        return np.array(self.brax_vec_gym_env.reset())
+        return np.array(self.brax_vec_gym_env.reset(), copy=False)
 
     def render(self, mode: str = 'rgb_array'):
         return self.brax_vec_gym_env(mode)
